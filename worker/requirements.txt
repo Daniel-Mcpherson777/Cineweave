@@ -1,0 +1,28 @@
+# Web Framework
+fastapi==0.115.4
+uvicorn[standard]==0.32.0
+pydantic==2.9.2
+
+# AWS/Cloudflare R2
+boto3==1.35.50
+
+# ML/Video Processing
+torch==2.5.1
+torchvision==0.20.1
+diffusers==0.31.0
+transformers==4.46.2
+accelerate==1.1.1
+safetensors==0.4.5
+opencv-python-headless==4.10.0.84
+pillow==11.0.0
+numpy==1.26.4
+
+# Video encoding
+imageio[ffmpeg]==2.36.0
+imageio-ffmpeg==0.5.1
+
+# RunPod
+runpod==1.7.4
+
+# Utilities
+python-dotenv==1.0.1

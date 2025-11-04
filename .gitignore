@@ -1,0 +1,75 @@
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+pip-delete-this-directory.txt
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Build outputs
+dist/
+build/
+*.egg-info/
+.next/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Testing
+.coverage
+.pytest_cache/
+coverage/
+*.cover
+
+# Convex
+.convex/
+convex/_generated/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Docker
+*.dockerfile.swp
+
+# OS
+Thumbs.db
+
+# Secrets and credentials
+*.pem
+*.key
+*.cert
+credentials.json
+service-account.json
+
+# RunPod
+/worker/workspace/
+/worker/out/
+
+# R2 test files
+test_uploads/
