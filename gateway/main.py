@@ -8,9 +8,9 @@ from typing import Optional
 
 from config import get_settings
 from auth import verify_clerk_token, get_user_id_from_token
-from convex_client import convex_client
 from runpod_client import runpod_client
 from r2_client import r2_client
+import db_client
 from models import (
     CreateJobRequest,
     CreateJobResponse,
@@ -41,11 +41,24 @@ app = FastAPI(
 # CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.app_base_url, "http://localhost:3000"],
+    allow_origins=[settings.app_base_url, "http://localhost:3000", "http://localhost:3001"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# Startup and shutdown events
+@app.on_event("startup")
+async def startup():
+    await db_client.connect_db()
+    logger.info("Database connected")
+
+
+@app.on_event("shutdown")
+async def shutdown():
+    await db_client.disconnect_db()
+    logger.info("Database disconnected")
 
 
 # Exception handlers
@@ -71,15 +84,12 @@ async def health_check():
 # Get or create user (called by frontend after Clerk auth)
 @app.post("/users/init")
 async def initialize_user(token_payload: dict = Depends(verify_clerk_token)):
-    """Initialize or retrieve user from Convex"""
+    """Initialize or retrieve user from database"""
     try:
         clerk_id = get_user_id_from_token(token_payload)
         email = token_payload.get('email', '')
 
-        user = await convex_client.mutation(
-            "users:getOrCreateUser",
-            {"clerkId": clerk_id, "email": email}
-        )
+        user = await db_client.get_or_create_user(clerk_id, email)
 
         return user
     except Exception as e:
@@ -95,19 +105,13 @@ async def get_credits(token_payload: dict = Depends(verify_clerk_token)):
         clerk_id = get_user_id_from_token(token_payload)
 
         # Get user
-        user = await convex_client.query(
-            "users:getUserByClerkId",
-            {"clerkId": clerk_id}
-        )
+        user = await db_client.get_user_by_clerk_id(clerk_id)
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         # Get credits
-        credits_data = await convex_client.query(
-            "credits:getCredits",
-            {"userId": user["_id"]}
-        )
+        credits_data = await db_client.get_credits(user["_id"])
 
         return CreditsResponse(**credits_data)
     except HTTPException:
@@ -128,10 +132,7 @@ async def create_job(
         clerk_id = get_user_id_from_token(token_payload)
 
         # Get user
-        user = await convex_client.query(
-            "users:getUserByClerkId",
-            {"clerkId": clerk_id}
-        )
+        user = await db_client.get_user_by_clerk_id(clerk_id)
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
@@ -139,10 +140,7 @@ async def create_job(
         user_id = user["_id"]
 
         # Check rate limiting (max concurrent jobs)
-        active_jobs = await convex_client.query(
-            "jobs:countActiveJobs",
-            {"userId": user_id}
-        )
+        active_jobs = await db_client.count_active_jobs(user_id)
 
         if active_jobs >= settings.max_concurrent_jobs_per_user:
             raise HTTPException(
@@ -160,35 +158,31 @@ async def create_job(
                 detail=f"Insufficient credits. Need {credits_needed}, have {user['credits']}"
             )
 
-        # Create job in Convex
-        job_id = await convex_client.mutation(
-            "jobs:createJob",
-            {
-                "userId": user_id,
-                "prompt": request.prompt,
-                "imageUrl": request.imageUrl,
-                "durationSec": request.durationSec,
-                "seed": request.seed,
-                "cfg": request.cfg,
-            }
+        # Create job in database
+        job_id = await db_client.create_job(
+            user_id=user_id,
+            prompt=request.prompt,
+            duration_sec=request.durationSec,
+            credits_used=credits_needed,
+            image_url=request.imageUrl,
+            seed=request.seed,
+            cfg=request.cfg or 7.5,
         )
 
         # Reserve credits
         try:
-            await convex_client.mutation(
-                "credits:reserveCredits",
-                {
-                    "userId": user_id,
-                    "credits": credits_needed,
-                    "jobId": job_id,
-                    "description": f"Video generation ({request.durationSec}s)"
-                }
+            await db_client.reserve_credits(
+                user_id=user_id,
+                credits=credits_needed,
+                job_id=job_id,
+                description=f"Video generation ({request.durationSec}s)"
             )
         except Exception as e:
             # Delete job if credit reservation fails
-            await convex_client.mutation(
-                "jobs:updateJobStatus",
-                {"jobId": job_id, "status": "failed", "errorMessage": str(e)}
+            await db_client.update_job_status(
+                job_id=job_id,
+                status="failed",
+                error_message=str(e)
             )
             raise HTTPException(status_code=402, detail=str(e))
 
@@ -205,13 +199,10 @@ async def create_job(
             runpod_job_id = runpod_response.get("id")
 
             # Update job with RunPod job ID
-            await convex_client.mutation(
-                "jobs:updateJobStatus",
-                {
-                    "jobId": job_id,
-                    "status": "running",
-                    "runpodJobId": runpod_job_id
-                }
+            await db_client.update_job_status(
+                job_id=job_id,
+                status="running",
+                runpod_job_id=runpod_job_id
             )
 
             logger.info(f"Job {job_id} submitted to RunPod as {runpod_job_id}")
@@ -219,18 +210,16 @@ async def create_job(
         except Exception as e:
             logger.error(f"Failed to submit to RunPod: {str(e)}")
             # Refund credits and mark job as failed
-            await convex_client.mutation(
-                "credits:refundCredits",
-                {
-                    "userId": user_id,
-                    "credits": credits_needed,
-                    "jobId": job_id,
-                    "reason": "RunPod submission failed"
-                }
+            await db_client.refund_credits(
+                user_id=user_id,
+                credits=credits_needed,
+                job_id=job_id,
+                reason="RunPod submission failed"
             )
-            await convex_client.mutation(
-                "jobs:updateJobStatus",
-                {"jobId": job_id, "status": "failed", "errorMessage": str(e)}
+            await db_client.update_job_status(
+                job_id=job_id,
+                status="failed",
+                error_message=str(e)
             )
             raise HTTPException(status_code=500, detail=f"Failed to submit job: {str(e)}")
 
@@ -258,19 +247,13 @@ async def get_job_status(
         clerk_id = get_user_id_from_token(token_payload)
 
         # Get user
-        user = await convex_client.query(
-            "users:getUserByClerkId",
-            {"clerkId": clerk_id}
-        )
+        user = await db_client.get_user_by_clerk_id(clerk_id)
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         # Get job
-        job = await convex_client.query(
-            "jobs:getJob",
-            {"jobId": job_id}
-        )
+        job = await db_client.get_job(job_id)
 
         if not job:
             raise HTTPException(status_code=404, detail="Job not found")
@@ -318,19 +301,13 @@ async def list_jobs(
         clerk_id = get_user_id_from_token(token_payload)
 
         # Get user
-        user = await convex_client.query(
-            "users:getUserByClerkId",
-            {"clerkId": clerk_id}
-        )
+        user = await db_client.get_user_by_clerk_id(clerk_id)
 
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         # Get jobs
-        jobs = await convex_client.query(
-            "jobs:listUserJobs",
-            {"userId": user["_id"], "limit": limit}
-        )
+        jobs = await db_client.list_user_jobs(user["_id"], limit)
 
         return jobs
 
@@ -365,10 +342,7 @@ async def runpod_webhook(
         logger.info(f"Received RunPod webhook for job {payload.id}: {payload.status}")
 
         # Get job by RunPod job ID
-        job = await convex_client.query(
-            "jobs:getJobByRunpodId",
-            {"runpodJobId": payload.id}
-        )
+        job = await db_client.get_job_by_runpod_id(payload.id)
 
         if not job:
             logger.warning(f"Job not found for RunPod ID: {payload.id}")
@@ -382,33 +356,24 @@ async def runpod_webhook(
             if not payload.output or "r2Url" not in payload.output:
                 logger.error(f"No R2 URL in RunPod output for job {job_id}")
                 # Refund credits
-                await convex_client.mutation(
-                    "credits:refundCredits",
-                    {
-                        "userId": user_id,
-                        "credits": job["creditsUsed"],
-                        "jobId": job_id,
-                        "reason": "Missing video output"
-                    }
+                await db_client.refund_credits(
+                    user_id=user_id,
+                    credits=job["creditsUsed"],
+                    job_id=job_id,
+                    reason="Missing video output"
                 )
-                await convex_client.mutation(
-                    "jobs:updateJobStatus",
-                    {
-                        "jobId": job_id,
-                        "status": "failed",
-                        "errorMessage": "Missing video output"
-                    }
+                await db_client.update_job_status(
+                    job_id=job_id,
+                    status="failed",
+                    error_message="Missing video output"
                 )
                 return {"status": "failed", "reason": "missing output"}
 
             # Update job with video URL
-            await convex_client.mutation(
-                "jobs:updateJobStatus",
-                {
-                    "jobId": job_id,
-                    "status": "done",
-                    "r2Url": payload.output["r2Url"]
-                }
+            await db_client.update_job_status(
+                job_id=job_id,
+                status="done",
+                r2_url=payload.output["r2Url"]
             )
 
             logger.info(f"Job {job_id} completed successfully")
@@ -419,24 +384,18 @@ async def runpod_webhook(
             error_message = payload.error or "Unknown error"
 
             # Refund credits
-            await convex_client.mutation(
-                "credits:refundCredits",
-                {
-                    "userId": user_id,
-                    "credits": job["creditsUsed"],
-                    "jobId": job_id,
-                    "reason": error_message
-                }
+            await db_client.refund_credits(
+                user_id=user_id,
+                credits=job["creditsUsed"],
+                job_id=job_id,
+                reason=error_message
             )
 
             # Update job status
-            await convex_client.mutation(
-                "jobs:updateJobStatus",
-                {
-                    "jobId": job_id,
-                    "status": "failed",
-                    "errorMessage": error_message
-                }
+            await db_client.update_job_status(
+                job_id=job_id,
+                status="failed",
+                error_message=error_message
             )
 
             logger.info(f"Job {job_id} failed: {error_message}")

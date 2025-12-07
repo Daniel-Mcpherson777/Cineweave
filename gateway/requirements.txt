@@ -14,7 +14,8 @@ cryptography==43.0.3
 # AWS/Cloudflare R2
 boto3==1.35.50
 
-# Database (Convex client)
+# Database
+prisma==0.15.0
 requests==2.32.3
 
 # CORS
