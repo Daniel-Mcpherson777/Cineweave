@@ -2,6 +2,7 @@
   "name": "cineweave-convex",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "convex dev",
     "deploy": "convex deploy",
@@ -9,7 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "convex": "^1.16.3"
+    "convex": "^1.28.2"
   },
   "devDependencies": {
     "@types/node": "^22.8.1",
